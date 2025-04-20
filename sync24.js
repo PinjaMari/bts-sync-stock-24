@@ -26,7 +26,7 @@ async function downloadCSV() {
       .pipe(csv({ separator: ';' }))  // Parse CSV directly from stream
       .on('data', (row) => {
         console.log('Row received:', row); // Log each row for debugging
-        
+
         const ean = row.ean;
         const stock = parseInt(row.stock, 10);
 
@@ -40,10 +40,8 @@ async function downloadCSV() {
       .on('end', async () => {
         console.log(`✅ CSV file processed with ${products.length} rows`);
 
-        // Use a delay before calling syncStockByBarcode to respect Shopify's rate limit
-        for (const product of products) {
-          await syncStockByBarcode(product.ean, product.stock);
-        }
+        // Call the processInBatches function
+        await processInBatches(products);
       })
       .on('error', (error) => {
         console.error('❌ Error processing CSV stream:', error.message);
@@ -54,16 +52,18 @@ async function downloadCSV() {
   }
 }
 
-// Helper: wait with a rate limit
+// Helper: wait with a rate limit and jitter
 function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  // Add a small random variation to the delay time
+  const jitter = Math.floor(Math.random() * 200); // Adds up to 200ms of jitter
+  return new Promise(resolve => setTimeout(resolve, ms + jitter));
 }
 
 // Sync stock by looking up product by barcode
 async function syncStockByBarcode(ean, stock, attempt = 1) {
   try {
     console.log(`📦 Syncing stock for EAN: ${ean}, Stock: ${stock}`);
-    
+
     const products = await shopify.product.list({ barcode: ean });
 
     if (!products.length) {
@@ -88,7 +88,7 @@ async function syncStockByBarcode(ean, stock, attempt = 1) {
     console.log(`✅ Stock updated for EAN ${ean} -> ${stock}`);
 
     // Add delay here to respect Shopify's API rate limit (2 calls per second)
-    await delay(500);  // 500ms = 2 calls per second
+    await delay(1000);  // 1 second delay between calls
 
   } catch (error) {
     if (error.code === 'ECONNRESET' && attempt <= 3) {
@@ -103,6 +103,30 @@ async function syncStockByBarcode(ean, stock, attempt = 1) {
       console.error(`❌ Error updating stock for EAN ${ean}:`, error.response.body);
     } else {
       console.error(`❌ Error updating stock for EAN ${ean}:`, error.message);
+    }
+  }
+}
+
+// Process products in batches to respect rate limit
+async function processInBatches(products) {
+  const batchSize = 2;  // Send 2 requests per second
+  let batch = [];
+  let i = 0;
+
+  while (i < products.length) {
+    batch.push(products[i]);
+    i++;
+
+    if (batch.length === batchSize || i === products.length) {
+      // Process this batch
+      for (const product of batch) {
+        await syncStockByBarcode(product.ean, product.stock);
+      }
+
+      // Add a delay of 1 second after processing each batch
+      console.log(`🕐 Waiting for the next batch...`);
+      await delay(1000);  // 1 second delay between batches
+      batch = [];  // Reset the batch
     }
   }
 }
